@@ -41,6 +41,22 @@ function appName(w) {
     return k;
 }
 
+// Use Cinnamon's own window opacity when it exists, so Cinnamon still draws
+// the windows underneath. Setting only the actor's opacity made Cinnamon skip
+// drawing what was behind, so you saw the wallpaper instead.
+const NATIVE = typeof Meta.Window.prototype.set_opacity === 'function';
+
+function setOpacity(w, a, val) {
+    if (NATIVE) {
+        try {
+            if (a.opacity !== 255) a.opacity = 255;
+            w.set_opacity(val);
+            return;
+        } catch (e) {}
+    }
+    a.opacity = val;
+}
+
 function toVal(p) { return (p - MIN) / (100 - MIN); }
 function toPct(v) { return Math.round(MIN + v * (100 - MIN)); }
 
@@ -138,7 +154,7 @@ class OpacityApplet extends Applet.IconApplet {
         if (!a) return;
         let pct = 100;
         try { if (!w.is_fullscreen()) pct = this.pctFor(w); } catch (e) { pct = this.pctFor(w); }
-        a.opacity = Math.round(pct * 2.55);
+        setOpacity(w, a, Math.round(pct * 2.55));
     }
 
     later(w) {
@@ -181,7 +197,10 @@ class OpacityApplet extends Applet.IconApplet {
 
     on_applet_removed_from_panel() {
         this.sigs.forEach(([obj, id]) => { try { obj.disconnect(id); } catch (e) {} });
-        global.get_window_actors().forEach(a => { try { a.opacity = 255; } catch (e) {} });
+        global.get_window_actors().forEach(a => {
+            try { a.opacity = 255; } catch (e) {}
+            try { if (NATIVE) a.get_meta_window().set_opacity(255); } catch (e) {}
+        });
     }
 }
 
