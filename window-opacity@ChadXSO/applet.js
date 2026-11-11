@@ -1,193 +1,214 @@
 const Applet = imports.ui.applet;
 const PopupMenu = imports.ui.popupMenu;
-const Mainloop = imports.mainloop;
+const Settings = imports.ui.settings;
+const SignalManager = imports.misc.signalManager;
+const Gettext = imports.gettext;
 const GLib = imports.gi.GLib;
 const Meta = imports.gi.Meta;
 const Clutter = imports.gi.Clutter;
-const ByteArray = imports.byteArray;
 
-const CONF_DIR = GLib.get_home_dir() + '/.config/window-opacity';
-const CONF = CONF_DIR + '/apps.json';
-const MIN = 20;
+const UUID = "window-opacity@ChadXSO";
+const MIN = 20; // never let a window go fully invisible
 
-function loadConf() {
-    try {
-        let [ok, data] = GLib.file_get_contents(CONF);
-        if (ok) return JSON.parse(ByteArray.toString(data));
-    } catch (e) {}
-    return {};
+Gettext.bindtextdomain(UUID, GLib.get_home_dir() + "/.local/share/locale");
+
+function _(text) {
+    return Gettext.dgettext(UUID, text);
 }
 
-function saveConf(c) {
-    try {
-        GLib.mkdir_with_parents(CONF_DIR, 0o755);
-        GLib.file_set_contents(CONF, JSON.stringify(c, null, 1));
-    } catch (e) { global.logError('window-opacity: ' + e); }
-}
+// Cinnamon's own window opacity keeps the windows underneath visible.
+// Setting only the actor's opacity made Cinnamon skip drawing what was behind.
+const NATIVE = typeof Meta.Window.prototype.set_opacity === "function";
 
-function isNormal(w) {
-    if (!w) return false;
-    let t = w.get_window_type();
-    if (t !== Meta.WindowType.NORMAL && t !== Meta.WindowType.DIALOG) return false;
-    try { if (w.is_skip_taskbar()) return false; } catch (e) {}
-    return true;
-}
-
-function appKey(w) { return w.get_wm_class() || 'unknown'; }
-
-function appName(w) {
-    let k = appKey(w);
-    if (k.startsWith('crx_') || k === 'unknown') return (w.get_title() || k).slice(0, 40);
-    return k;
-}
-
-// Use Cinnamon's own window opacity when it exists, so Cinnamon still draws
-// the windows underneath. Setting only the actor's opacity made Cinnamon skip
-// drawing what was behind, so you saw the wallpaper instead.
-const NATIVE = typeof Meta.Window.prototype.set_opacity === 'function';
-
-function setOpacity(w, a, val) {
+function setOpacity(win, actor, value) {
     if (NATIVE) {
-        try {
-            if (a.opacity !== 255) a.opacity = 255;
-            w.set_opacity(val);
-            return;
-        } catch (e) {}
+        if (actor.opacity !== 255)
+            actor.opacity = 255;
+        win.set_opacity(value);
+    } else {
+        actor.opacity = value;
     }
-    a.opacity = val;
 }
 
-function toVal(p) { return (p - MIN) / (100 - MIN); }
-function toPct(v) { return Math.round(MIN + v * (100 - MIN)); }
+function isNormal(win) {
+    if (!win)
+        return false;
+    let type = win.get_window_type();
+    if (type !== Meta.WindowType.NORMAL && type !== Meta.WindowType.DIALOG)
+        return false;
+    return !win.is_skip_taskbar();
+}
 
-class OpacityApplet extends Applet.IconApplet {
+function appKey(win) {
+    return win.get_wm_class() || "unknown";
+}
+
+function appName(win) {
+    let key = appKey(win);
+    if (key.startsWith("crx_") || key === "unknown")
+        return (win.get_title() || key).slice(0, 40);
+    return key;
+}
+
+function toVal(pct) { return (pct - MIN) / (100 - MIN); }
+function toPct(val) { return Math.round(MIN + val * (100 - MIN)); }
+
+class WindowOpacityApplet extends Applet.IconApplet {
     constructor(metadata, orientation, panelHeight, instanceId) {
         super(orientation, panelHeight, instanceId);
-        this.set_applet_icon_symbolic_name('display-brightness-symbolic');
-        this.set_applet_tooltip('Window opacity (click, or scroll on this icon)');
-        this.conf = loadConf();
-        if (this.conf._default === undefined) this.conf._default = 75;
-        this.target = null;
-        this.sigs = [];
+        this.set_applet_icon_symbolic_name("display-brightness-symbolic");
+        this.set_applet_tooltip(_("Window opacity (click, or scroll on this icon)"));
 
+        this.target = null;
+        this.timers = new Set();
+        this.signals = new SignalManager.SignalManager(null);
+
+        this.settings = new Settings.AppletSettings(this, metadata.uuid, instanceId);
+        this.settings.bind("default-opacity", "defaultPct", () => {
+            this.applyAll();
+            this.refresh(true);
+        });
+        this.apps = this.settings.getValue("apps") || {};
+
+        this._buildMenu(orientation);
+
+        this.signals.connect(global.display, "notify::focus-window", () => this._onFocus());
+        this.signals.connect(global.window_manager, "map", (wm, actor) => this._applyLater(actor.get_meta_window()));
+        this.signals.connect(global.window_manager, "unminimize", (wm, actor) => this._applyLater(actor.get_meta_window()));
+
+        this.actor.connect("scroll-event", (actor, event) => {
+            let dir = event.get_scroll_direction();
+            let cur = this._currentPct();
+            if (dir === Clutter.ScrollDirection.UP)
+                this._setAppPct(Math.min(100, cur + 5), true);
+            else if (dir === Clutter.ScrollDirection.DOWN)
+                this._setAppPct(Math.max(MIN, cur - 5), true);
+            return Clutter.EVENT_STOP;
+        });
+
+        this._onFocus();
+        this.applyAll();
+    }
+
+    _buildMenu(orientation) {
         this.menuManager = new PopupMenu.PopupMenuManager(this);
         this.menu = new Applet.AppletPopupMenu(this, orientation);
         this.menuManager.addMenu(this.menu);
 
-        this.label = new PopupMenu.PopupMenuItem('', { reactive: false });
-        this.menu.addMenuItem(this.label);
-        this.slider = new PopupMenu.PopupSliderMenuItem(1);
-        this.slider.connect('value-changed', (s, v) => this.setPct(toPct(v), false));
-        this.menu.addMenuItem(this.slider);
+        this.appLabel = new PopupMenu.PopupMenuItem("", { reactive: false });
+        this.menu.addMenuItem(this.appLabel);
+        this.appSlider = new PopupMenu.PopupSliderMenuItem(1);
+        this.appSlider.connect("value-changed", (slider, val) => this._setAppPct(toPct(val), false));
+        this.menu.addMenuItem(this.appSlider);
 
-        let solid = new PopupMenu.PopupMenuItem('Make this app solid');
-        solid.connect('activate', () => this.setPct(100, true));
+        let solid = new PopupMenu.PopupMenuItem(_("Make this app solid"));
+        solid.connect("activate", () => this._setAppPct(100, true));
         this.menu.addMenuItem(solid);
 
-        let useDef = new PopupMenu.PopupMenuItem('Put this app back on the default');
-        useDef.connect('activate', () => {
-            if (!this.targetOk()) return;
-            delete this.conf[appKey(this.target)];
-            saveConf(this.conf);
+        let useDefault = new PopupMenu.PopupMenuItem(_("Put this app back on the default"));
+        useDefault.connect("activate", () => {
+            if (!this._targetOk())
+                return;
+            delete this.apps[appKey(this.target)];
+            this._saveApps();
             this.applyAll();
             this.refresh(true);
         });
-        this.menu.addMenuItem(useDef);
+        this.menu.addMenuItem(useDefault);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        this.defLabel = new PopupMenu.PopupMenuItem('', { reactive: false });
-        this.menu.addMenuItem(this.defLabel);
-        this.defSlider = new PopupMenu.PopupSliderMenuItem(toVal(this.conf._default));
-        this.defSlider.connect('value-changed', (s, v) => {
-            this.conf._default = toPct(v);
-            saveConf(this.conf);
+        this.defaultLabel = new PopupMenu.PopupMenuItem("", { reactive: false });
+        this.menu.addMenuItem(this.defaultLabel);
+        this.defaultSlider = new PopupMenu.PopupSliderMenuItem(toVal(this.defaultPct));
+        this.defaultSlider.connect("value-changed", (slider, val) => {
+            this.settings.setValue("default-opacity", toPct(val));
             this.applyAll();
             this.refresh(false);
         });
-        this.menu.addMenuItem(this.defSlider);
-
-        this.sigs.push([global.display, global.display.connect('notify::focus-window', () => this.onFocus())]);
-        for (let s of ['map', 'unminimize']) {
-            try {
-                this.sigs.push([global.window_manager, global.window_manager.connect(s, (wm, actor) => {
-                    try { this.later(actor.get_meta_window()); } catch (e) {}
-                })]);
-            } catch (e) {}
-        }
-
-        this.actor.connect('scroll-event', (a, e) => {
-            let d = e.get_scroll_direction();
-            let cur = this.currentPct();
-            if (d === Clutter.ScrollDirection.UP) this.setPct(Math.min(100, cur + 5), true);
-            else if (d === Clutter.ScrollDirection.DOWN) this.setPct(Math.max(MIN, cur - 5), true);
-            return Clutter.EVENT_STOP;
-        });
-
-        saveConf(this.conf);
-        this.onFocus();
-        this.applyAll();
+        this.menu.addMenuItem(this.defaultSlider);
     }
 
-    targetOk() {
-        try { return this.target && this.target.get_compositor_private() !== null; }
-        catch (e) { return false; }
+    _saveApps() {
+        // pass a copy so the settings layer sees a changed value
+        this.settings.setValue("apps", JSON.parse(JSON.stringify(this.apps)));
     }
 
-    pctFor(w) {
-        let v = this.conf[appKey(w)];
-        return v !== undefined ? v : this.conf._default;
+    _targetOk() {
+        return this.target !== null && this.target.get_compositor_private() !== null;
     }
 
-    onFocus() {
-        let w = global.display.focus_window;
-        if (isNormal(w)) {
-            this.target = w;
-            try { this.apply(w); } catch (e) {}
+    _pctFor(win) {
+        let own = this.apps[appKey(win)];
+        return own !== undefined ? own : this.defaultPct;
+    }
+
+    _currentPct() {
+        return this._targetOk() ? this._pctFor(this.target) : 100;
+    }
+
+    _onFocus() {
+        let win = global.display.focus_window;
+        if (isNormal(win)) {
+            this.target = win;
+            this._apply(win);
         }
     }
 
-    currentPct() { return this.targetOk() ? this.pctFor(this.target) : 100; }
-
-    apply(w) {
-        let a = w.get_compositor_private();
-        if (!a) return;
-        let pct = 100;
-        try { if (!w.is_fullscreen()) pct = this.pctFor(w); } catch (e) { pct = this.pctFor(w); }
-        setOpacity(w, a, Math.round(pct * 2.55));
+    _apply(win) {
+        let actor = win.get_compositor_private();
+        if (!actor)
+            return;
+        let pct = win.is_fullscreen() ? 100 : this._pctFor(win);
+        setOpacity(win, actor, Math.round(pct * 2.55));
     }
 
-    later(w) {
-        if (!isNormal(w)) return;
+    _applyLater(win) {
+        if (!isNormal(win))
+            return;
+        // some apps finish mapping a moment after the signal, so apply a few times
         for (let ms of [250, 700, 1500]) {
-            Mainloop.timeout_add(ms, () => { try { this.apply(w); } catch (e) {} return false; });
+            let id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+                this.timers.delete(id);
+                if (win.get_compositor_private())
+                    this._apply(win);
+                return GLib.SOURCE_REMOVE;
+            });
+            this.timers.add(id);
         }
     }
 
     applyAll() {
-        global.get_window_actors().forEach(a => {
-            try { let w = a.get_meta_window(); if (isNormal(w)) this.apply(w); } catch (e) {}
+        global.get_window_actors().forEach(actor => {
+            let win = actor.get_meta_window();
+            if (isNormal(win))
+                this._apply(win);
         });
     }
 
-    setPct(p, moveSlider) {
-        if (!this.targetOk()) return;
-        this.conf[appKey(this.target)] = p;
-        saveConf(this.conf);
+    _setAppPct(pct, moveSlider) {
+        if (!this._targetOk())
+            return;
+        this.apps[appKey(this.target)] = pct;
+        this._saveApps();
         this.applyAll();
         this.refresh(moveSlider);
     }
 
     refresh(moveSlider) {
-        this.defLabel.label.set_text('Default for all apps: ' + this.conf._default + '%');
-        if (!this.targetOk()) {
-            this.label.label.set_text('Click on a window first');
+        this.defaultLabel.label.set_text(_("Default for all apps: %s").format(this.defaultPct + "%"));
+        this.defaultSlider.setValue(toVal(this.defaultPct));
+        if (!this._targetOk()) {
+            this.appLabel.label.set_text(_("Click on a window first"));
             return;
         }
-        let k = appKey(this.target);
-        let own = this.conf[k] !== undefined;
-        this.label.label.set_text(appName(this.target) + ': ' + this.currentPct() + '%' + (own ? '' : ' (default)'));
-        if (moveSlider) this.slider.setValue(toVal(this.currentPct()));
+        let pct = this._currentPct();
+        let text = appName(this.target) + ": " + pct + "%";
+        if (this.apps[appKey(this.target)] === undefined)
+            text = _("%s (default)").format(text);
+        this.appLabel.label.set_text(text);
+        if (moveSlider)
+            this.appSlider.setValue(toVal(pct));
     }
 
     on_applet_clicked() {
@@ -196,14 +217,19 @@ class OpacityApplet extends Applet.IconApplet {
     }
 
     on_applet_removed_from_panel() {
-        this.sigs.forEach(([obj, id]) => { try { obj.disconnect(id); } catch (e) {} });
-        global.get_window_actors().forEach(a => {
-            try { a.opacity = 255; } catch (e) {}
-            try { if (NATIVE) a.get_meta_window().set_opacity(255); } catch (e) {}
+        this.signals.disconnectAllSignals();
+        this.timers.forEach(id => GLib.source_remove(id));
+        this.timers.clear();
+        this.settings.finalize();
+        global.get_window_actors().forEach(actor => {
+            actor.opacity = 255;
+            let win = actor.get_meta_window();
+            if (NATIVE && win)
+                win.set_opacity(255);
         });
     }
 }
 
 function main(metadata, orientation, panelHeight, instanceId) {
-    return new OpacityApplet(metadata, orientation, panelHeight, instanceId);
+    return new WindowOpacityApplet(metadata, orientation, panelHeight, instanceId);
 }
