@@ -40,11 +40,11 @@ Menu options:
 ./uninstall.sh
 ```
 
-All windows go back to solid. Your saved settings stay in `~/.config/window-opacity/` until you delete that folder.
+All windows go back to solid.
 
 ## How it works
 
-Cinnamon ignores the usual X11 opacity hint (`_NET_WM_WINDOW_OPACITY`, the one `transset` sets) for most windows. This applet uses Cinnamon's own window opacity (`Meta.Window.set_opacity`), which works on every app and keeps the windows underneath visible. It reapplies the setting whenever a window opens or is unminimized. Settings are kept by window class in `~/.config/window-opacity/apps.json`.
+Cinnamon ignores the usual X11 opacity hint (`_NET_WM_WINDOW_OPACITY`, the one `transset` sets) for most windows. This applet uses Cinnamon's own window opacity (`Meta.Window.set_opacity`), which works on every app and keeps the windows underneath visible. It reapplies the setting whenever a window opens or is unminimized. Settings are kept by window class through Cinnamon's own applet settings, and the default can also be changed from the applet's Configure dialog.
 
 ## Notes
 

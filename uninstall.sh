@@ -11,4 +11,4 @@ lst = [x for x in ast.literal_eval(cur) if ':' + uuid + ':' not in x]
 subprocess.check_call(['gsettings', 'set', 'org.cinnamon', 'enabled-applets', str(lst)])
 PY
 rm -rf "$HOME/.local/share/cinnamon/applets/$UUID"
-echo "Removed. Your saved settings are still in ~/.config/window-opacity/ (delete that folder to forget them)."
+echo "Removed. All windows are solid again."
