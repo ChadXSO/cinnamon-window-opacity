@@ -23,6 +23,8 @@ The sun icon shows up on the right side of your first panel (usually the bottom 
 
 ## Use it
 
+![The sun icon menu with both sliders](screenshots/menu.png)
+
 1. Click a window so it's the active one.
 2. Click the sun icon.
 3. Drag the top slider for that app, or the bottom slider for the default for every app.
