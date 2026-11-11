@@ -40,5 +40,5 @@ rm -rf "$HOME/.local/share/cinnamon/applets/window-opacity@chad"
 gdbus call --session --dest org.Cinnamon --object-path /org/Cinnamon \
   --method org.Cinnamon.ReloadXlet "$UUID" 'APPLET' >/dev/null 2>&1 || true
 
-echo "Done. Look for the sun icon on your panel."
+echo "Done. Look for the panel icon on your panel."
 echo "If it doesn't show up, restart Cinnamon (Ctrl+Alt+Esc) or log out and back in."
